@@ -15,7 +15,7 @@ TABLEROS = ["test1"]
 
 ETIQUETAS_EXCLUIDAS = [
     "sub-orden",
-    "archivar targeta"
+    "archivar tarjeta"
 ]
 
 
