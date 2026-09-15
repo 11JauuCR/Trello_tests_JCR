@@ -2,6 +2,7 @@ import os
 import re
 import requests
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 
@@ -12,13 +13,18 @@ PARAMS = {
 
 TABLEROS = ["test1"]
 
+ETIQUETAS_EXCLUIDAS = [
+    "sub-orden",
+    "archivar targeta"
+]
 
-def get(url, params_extra=None):
-    params = {**PARAMS, **(params_extra or {})}
 
-    respuesta = requests.get(url, params=params)
+def get(url, params=None):
+    respuesta = requests.get(
+        url,
+        params={**PARAMS, **(params or {})}
+    )
     respuesta.raise_for_status()
-
     return respuesta.json()
 
 
@@ -34,39 +40,44 @@ def actualizar_fecha(card_id, campo_id, fecha):
     respuesta.raise_for_status()
 
 
-def actualizar_opcion(card_id, campo_id, opcion_id):
-    url = f"https://api.trello.com/1/cards/{card_id}/customField/{campo_id}/item"
+def tiene_fecha(tarjeta, campo_id):
+    for campo in tarjeta.get("customFieldItems", []):
+        if campo["idCustomField"] == campo_id:
+            return bool(campo.get("value", {}).get("date"))
 
-    respuesta = requests.put(
-        url,
-        params=PARAMS,
-        json={"idValue": opcion_id}
-    )
-
-    respuesta.raise_for_status()
+    return False
 
 
-def buscar_ent(card_id):
-    url = f"https://api.trello.com/1/cards/{card_id}/actions"
-
+def buscar_fecha_entregado(card_id):
     acciones = get(
-        url,
-        {"filter": "commentCard"}
+        f"https://api.trello.com/1/cards/{card_id}/actions",
+        {
+            "filter": "commentCard",
+            "limit": 100
+        }
     )
+
+    fechas = []
 
     for accion in acciones:
-        texto = accion["data"]["text"]
+        texto = accion["data"].get("text", "")
 
-        match = re.search(
-            r"ENTREGADO\s+POR\s+(.+)",
+        if re.search(
+            r"ENTREGADO\s+POR",
             texto,
             re.IGNORECASE
+        ):
+            fechas.append(accion["date"])
+
+    if not fechas:
+        return None
+
+    return max(
+        fechas,
+        key=lambda fecha: datetime.fromisoformat(
+            fecha.replace("Z", "+00:00")
         )
-
-        if match:
-            return match.group(1).strip()
-
-    return None
+    )
 
 
 tableros = get(
@@ -79,8 +90,6 @@ for tablero in tableros:
         continue
 
     board_id = tablero["id"]
-
-    print(f"\nTablero: {tablero['name']}")
 
     campos = get(
         f"https://api.trello.com/1/boards/{board_id}/customFields"
@@ -102,53 +111,76 @@ for tablero in tableros:
 
     tarjetas = get(
         f"https://api.trello.com/1/boards/{board_id}/cards",
-        {"customFieldItems": "true"}
+        {
+            "filter": "closed",
+            "customFieldItems": "true"
+        }
     )
 
     for tarjeta in tarjetas:
 
+        # Solo cards archivadas
+        if not tarjeta.get("closed"):
+            continue
+
+        # Ignorar SUB-ORDEN y ARCHIVAR TARGETA
+        etiquetas = [
+            e["name"].strip().lower()
+            for e in tarjeta.get("labels", [])
+        ]
+
+        if any(
+            etiqueta in ETIQUETAS_EXCLUIDAS
+            for etiqueta in etiquetas
+        ):
+            continue
+
         card_id = tarjeta["id"]
 
-        print(f"\nTarjeta: {tarjeta['name']}")
-
-        # FACT = última modificación de la tarjeta
-        fecha = tarjeta.get("dateLastActivity")
-
-        if fecha:
-            actualizar_fecha(
-                card_id,
-                fact["id"],
-                fecha
-            )
-
-            print("FACT:", fecha)
-
-        # ENT = persona de "ENTREGADO POR X"
-        nombre = buscar_ent(card_id)
-
-        if not nombre:
-            print("Sin comentario ENTREGADO POR")
-            continue
-
-        # Buscar X entre las opciones de ENT
-        opcion = next(
-            (
-                o for o in ent.get("options", [])
-                if o.get("value", {}).get("text", "").strip().lower()
-                == nombre.lower()
-            ),
-            None
+        fact_relleno = tiene_fecha(
+            tarjeta,
+            fact["id"]
         )
 
-        if not opcion:
-            print(f"No existe la opción ENT: {nombre}")
-            continue
-
-        # Actualizar ENT
-        actualizar_opcion(
-            card_id,
-            ent["id"],
-            opcion["id"]
+        ent_relleno = tiene_fecha(
+            tarjeta,
+            ent["id"]
         )
 
-        print("ENT:", nombre)
+        # Si los dos están rellenados, no modificar nada
+        if fact_relleno and ent_relleno:
+            continue
+
+        # FACT = última modificación de la card
+        if not fact_relleno:
+
+            fecha = tarjeta.get("dateLastActivity")
+
+            if fecha:
+                actualizar_fecha(
+                    card_id,
+                    fact["id"],
+                    fecha
+                )
+
+                print(
+                    f"{tarjeta['name']} -> FACT: {fecha}"
+                )
+
+        # ENT = fecha del comentario "ENTREGADO POR..."
+        if not ent_relleno:
+
+            fecha = buscar_fecha_entregado(card_id)
+
+            if fecha:
+                actualizar_fecha(
+                    card_id,
+                    ent["id"],
+                    fecha
+                )
+
+                print(
+                    f"{tarjeta['name']} -> ENT: {fecha}"
+                )
+
+print("Proceso terminado")
