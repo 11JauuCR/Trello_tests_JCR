@@ -29,12 +29,19 @@ def get(url, params=None):
 
 
 def actualizar_fecha(card_id, campo_id, fecha):
-    url = f"https://api.trello.com/1/cards/{card_id}/customField/{campo_id}/item"
+    url = (
+        f"https://api.trello.com/1/cards/"
+        f"{card_id}/customField/{campo_id}/item"
+    )
 
     respuesta = requests.put(
         url,
         params=PARAMS,
-        json={"value": {"date": fecha}}
+        json={
+            "value": {
+                "date": fecha
+            }
+        }
     )
 
     respuesta.raise_for_status()
@@ -43,12 +50,22 @@ def actualizar_fecha(card_id, campo_id, fecha):
 def tiene_fecha(tarjeta, campo_id):
     for campo in tarjeta.get("customFieldItems", []):
         if campo["idCustomField"] == campo_id:
-            return bool(campo.get("value", {}).get("date"))
+            return bool(
+                campo.get("value", {}).get("date")
+            )
 
     return False
 
 
 def buscar_fecha_entregado(card_id):
+    """
+    Busca el último comentario que contenga:
+    
+        ENTREGADO POR X
+    
+    y devuelve la fecha de ese comentario.
+    """
+
     acciones = get(
         f"https://api.trello.com/1/cards/{card_id}/actions",
         {
@@ -57,23 +74,32 @@ def buscar_fecha_entregado(card_id):
         }
     )
 
-    fechas = []
+    comentarios_entregado = []
 
     for accion in acciones:
-        texto = accion["data"].get("text", "")
 
+        texto = accion.get("data", {}).get("text", "")
+
+        # Busca "ENTREGADO POR" independientemente
+        # de mayúsculas/minúsculas.
         if re.search(
-            r"ENTREGADO\s+POR",
+            r"\bENTREGADO\s+POR\b",
             texto,
             re.IGNORECASE
         ):
-            fechas.append(accion["date"])
+            fecha_comentario = accion.get("date")
 
-    if not fechas:
+            if fecha_comentario:
+                comentarios_entregado.append(
+                    fecha_comentario
+                )
+
+    if not comentarios_entregado:
         return None
 
+    # Nos quedamos con el comentario más reciente
     return max(
-        fechas,
+        comentarios_entregado,
         key=lambda fecha: datetime.fromisoformat(
             fecha.replace("Z", "+00:00")
         )
@@ -91,17 +117,30 @@ for tablero in tableros:
 
     board_id = tablero["id"]
 
+    print(f"\nProcesando tablero: {tablero['name']}")
+
+    # -----------------------------------------
+    # CAMPOS PERSONALIZADOS
+    # -----------------------------------------
+
     campos = get(
-        f"https://api.trello.com/1/boards/{board_id}/customFields"
+        f"https://api.trello.com/1/boards/"
+        f"{board_id}/customFields"
     )
 
     fact = next(
-        (c for c in campos if c["name"] == "FACT"),
+        (
+            c for c in campos
+            if c["name"].strip().upper() == "FACT"
+        ),
         None
     )
 
     ent = next(
-        (c for c in campos if c["name"] == "ENT"),
+        (
+            c for c in campos
+            if c["name"].strip().upper() == "ENT"
+        ),
         None
     )
 
@@ -109,8 +148,21 @@ for tablero in tableros:
         print("Falta FACT o ENT")
         continue
 
+    # Comprobar que ENT es realmente un campo de fecha
+    if ent["type"] != "date":
+        print(
+            f"El campo ENT no es de tipo fecha. "
+            f"Tipo encontrado: {ent['type']}"
+        )
+        continue
+
+    # -----------------------------------------
+    # TARJETAS ARCHIVADAS
+    # -----------------------------------------
+
     tarjetas = get(
-        f"https://api.trello.com/1/boards/{board_id}/cards",
+        f"https://api.trello.com/1/boards/"
+        f"{board_id}/cards",
         {
             "filter": "closed",
             "customFieldItems": "true"
@@ -123,7 +175,10 @@ for tablero in tableros:
         if not tarjeta.get("closed"):
             continue
 
-        # Ignorar SUB-ORDEN y ARCHIVAR TARGETA
+        # -----------------------------------------
+        # ETIQUETAS EXCLUIDAS
+        # -----------------------------------------
+
         etiquetas = [
             e["name"].strip().lower()
             for e in tarjeta.get("labels", [])
@@ -137,6 +192,10 @@ for tablero in tableros:
 
         card_id = tarjeta["id"]
 
+        # -----------------------------------------
+        # COMPROBAR FACT Y ENT
+        # -----------------------------------------
+
         fact_relleno = tiene_fecha(
             tarjeta,
             fact["id"]
@@ -147,40 +206,60 @@ for tablero in tableros:
             ent["id"]
         )
 
-        # Si los dos están rellenados, no modificar nada
-        if fact_relleno and ent_relleno:
-            continue
+        # -----------------------------------------
+        # FACT
+        # Última modificación de la tarjeta
+        # -----------------------------------------
 
-        # FACT = última modificación de la card
         if not fact_relleno:
 
-            fecha = tarjeta.get("dateLastActivity")
+            fecha_fact = tarjeta.get(
+                "dateLastActivity"
+            )
 
-            if fecha:
+            if fecha_fact:
+
                 actualizar_fecha(
                     card_id,
                     fact["id"],
-                    fecha
+                    fecha_fact
                 )
 
                 print(
-                    f"{tarjeta['name']} -> FACT: {fecha}"
+                    f"{tarjeta['name']} -> "
+                    f"FACT: {fecha_fact}"
                 )
 
-        # ENT = fecha del comentario "ENTREGADO POR..."
+        # -----------------------------------------
+        # ENT
+        # Fecha del comentario "ENTREGADO POR..."
+        # -----------------------------------------
+
         if not ent_relleno:
 
-            fecha = buscar_fecha_entregado(card_id)
+            fecha_ent = buscar_fecha_entregado(
+                card_id
+            )
 
-            if fecha:
+            if fecha_ent:
+
                 actualizar_fecha(
                     card_id,
                     ent["id"],
-                    fecha
+                    fecha_ent
                 )
 
                 print(
-                    f"{tarjeta['name']} -> ENT: {fecha}"
+                    f"{tarjeta['name']} -> "
+                    f"ENT: {fecha_ent}"
                 )
 
-print("Proceso terminado")
+            else:
+
+                print(
+                    f"{tarjeta['name']} -> "
+                    f"ENT: no encontrado"
+                )
+
+
+print("\nProceso terminado")
