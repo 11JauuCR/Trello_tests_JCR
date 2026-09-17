@@ -11,7 +11,7 @@ PARAMS = {
     "token": os.getenv("TRELLO_TOKEN")
 }
 
-TABLEROS = ["test1"]
+TABLEROS = ["test"]
 
 ETIQUETAS_EXCLUIDAS = [
     "sub-orden",
