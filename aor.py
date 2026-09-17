@@ -1,189 +1,131 @@
 import os
 import requests
 from dotenv import load_dotenv
+from datetime import datetime, UTC
 
 load_dotenv()
 
-API_KEY = os.getenv("TRELLO_API_KEY")
+KEY = os.getenv("TRELLO_API_KEY")
 TOKEN = os.getenv("TRELLO_TOKEN")
+BASE = "https://api.trello.com/1"
+AUTH = {"key": KEY, "token": TOKEN}
 
-URL = "https://api.trello.com/1"
-
-PARAMS = {
-    "key": API_KEY,
-    "token": TOKEN
-}
-
-ETIQUETAS_EXCLUIDAS = [
-    "sub-orden",
-    "archivar targeta"
-]
+EXCLUIDAS = ["sub-orden", "archivar targeta"]
 
 
-def get(url, params=None):
-    respuesta = requests.get(
-        url,
-        params={**PARAMS, **(params or {})}
-    )
-    respuesta.raise_for_status()
-    return respuesta.json()
+def get(url, **params):
+    r = requests.get(url, params={**AUTH, **params})
+    r.raise_for_status()
+    return r.json()
+
+
+def fecha_creacion(card_id):
+    ts_hex = card_id[:8]
+    ts = int(ts_hex, 16)
+    return datetime.fromtimestamp(ts, UTC).isoformat().replace("+00:00", "Z")
 
 
 def buscar_tablero(nombre):
-    tableros = get(
-        f"{URL}/members/me/boards"
-    )
-
-    for tablero in tableros:
-        if tablero["name"].strip().lower() == nombre.strip().lower():
-            return tablero["id"]
-
-    return None
+    for b in get(f"{BASE}/members/me/boards"):
+        if b["name"].strip().lower() == nombre.strip().lower():
+            return b
 
 
-def actualizar_aor(card_id, campo_id, fecha):
-    url = (
-        f"{URL}/cards/{card_id}"
-        f"/customField/{campo_id}/item"
-    )
+def elegir_lista(board_id):
+    listas = get(f"{BASE}/boards/{board_id}/lists", filter="all")
 
-    respuesta = requests.put(
-        url,
-        params=PARAMS,
-        json={
-            "value": {
-                "date": fecha
-            }
-        }
-    )
+    for i, l in enumerate(listas, 1):
+        estado = " (archivada)" if l["closed"] else ""
+        print(f"{i}. {l['name']}{estado}")
 
-    respuesta.raise_for_status()
+    while True:
+        try:
+            n = int(input("\nElige una lista: "))
+            if 1 <= n <= len(listas):
+                return listas[n - 1]
+        except ValueError:
+            pass
 
-
-def tiene_fecha(tarjeta, campo_id):
-    for campo in tarjeta.get("customFieldItems", []):
-        if campo["idCustomField"] == campo_id:
-            return bool(
-                campo.get("value", {}).get("date")
-            )
-
-    return False
-
-
-def tiene_etiqueta_excluida(tarjeta):
-    for etiqueta in tarjeta.get("labels", []):
-
-        nombre = etiqueta["name"].strip().lower()
-
-        if nombre in ETIQUETAS_EXCLUIDAS:
-            return True
-
-    return False
+        print("Número no válido.")
 
 
 def main():
 
-    if not API_KEY or not TOKEN:
-        print("Faltan la API key o el token en el .env")
+    nombre = input("Tablero: ").strip()
+    tablero = buscar_tablero(nombre)
+
+    if not tablero:
+        print("No se ha encontrado el tablero.")
         return
 
-    nombre_tablero = input(
-        "Introduce el nombre del tablero: "
-    ).strip()
+    print(f"\nTablero: {tablero['name']}\n")
+    print("Listas:")
 
-    board_id = buscar_tablero(nombre_tablero)
+    lista = elegir_lista(tablero["id"])
 
-    if not board_id:
-        print(
-            f"No se ha encontrado el tablero "
-            f"'{nombre_tablero}'"
-        )
-        return
+    print(f"\nLista seleccionada: {lista['name']}")
 
-    print(f"Tablero encontrado: {board_id}")
+    campos = get(f"{BASE}/boards/{tablero['id']}/customFields")
 
-    campos = get(
-        f"{URL}/boards/{board_id}/customFields"
+    aor = next(
+        (
+            x for x in campos
+            if x["name"].strip().upper() == "AOR"
+            and x["type"] == "date"
+        ),
+        None
     )
-
-    aor = None
-
-    for campo in campos:
-        if campo["name"].strip().upper() == "AOR":
-            aor = campo
-            break
 
     if not aor:
-        print("No se ha encontrado el campo AOR")
+        print("No se ha encontrado el campo AOR.")
         return
-
-    if aor["type"] != "date":
-        print("El campo AOR no es de tipo fecha")
-        return
-
-    print(f"Campo AOR encontrado: {aor['id']}")
 
     tarjetas = get(
-        f"{URL}/boards/{board_id}/cards",
-        {
-            "fields": "name,start,labels",
-            "customFieldItems": "true"
-        }
+        f"{BASE}/lists/{lista['id']}/cards",
+        fields="name,labels",
+        customFieldItems="true"
     )
 
-    print(f"Tarjetas encontradas: {len(tarjetas)}")
-    print()
+    print(f"Tarjetas: {len(tarjetas)}\n")
 
     for tarjeta in tarjetas:
 
         nombre = tarjeta["name"]
-        card_id = tarjeta["id"]
 
-        # Saltar tarjetas con etiquetas excluidas
-        if tiene_etiqueta_excluida(tarjeta):
-            print(
-                f"⏭️ {nombre} -> tarjeta excluida"
-            )
+        etiquetas = [
+            x.get("name", "").strip().lower()
+            for x in tarjeta.get("labels", [])
+        ]
+
+        if any(x in etiquetas for x in EXCLUIDAS):
+            print(f"⏭️ {nombre} -> excluida")
             continue
 
-        # Si AOR ya tiene una fecha, no hacer nada
-        if tiene_fecha(tarjeta, aor["id"]):
-            print(
-                f"⏭️ {nombre} -> AOR ya tiene fecha"
-            )
+        tiene_aor = any(
+            x["idCustomField"] == aor["id"]
+            and x.get("value", {}).get("date")
+            for x in tarjeta.get("customFieldItems", [])
+        )
+
+        if tiene_aor:
+            print(f"⏭️ {nombre} -> AOR ya tiene fecha")
             continue
 
-        # Obtener fecha de inicio
-        fecha_inicio = tarjeta.get("start")
-
-        if not fecha_inicio:
-            print(
-                f"⏭️ {nombre} -> sin fecha de inicio"
-            )
-            continue
+        fecha = fecha_creacion(tarjeta["id"])
 
         try:
+            requests.put(
+                f"{BASE}/cards/{tarjeta['id']}/customField/{aor['id']}/item",
+                params=AUTH,
+                json={"value": {"date": fecha}}
+            ).raise_for_status()
 
-            actualizar_aor(
-                card_id,
-                aor["id"],
-                fecha_inicio
-            )
+            print(f"✅ {nombre} -> {fecha}")
 
-            print(
-                f"✅ {nombre} -> "
-                f"AOR: {fecha_inicio}"
-            )
+        except requests.HTTPError as e:
+            print(f"❌ {nombre} -> {e}")
 
-        except requests.HTTPError as error:
-
-            print(
-                f"❌ {nombre} -> "
-                f"error: {error}"
-            )
-
-    print()
-    print("Proceso terminado.")
+    print("\nTerminado.")
 
 
 if __name__ == "__main__":
