@@ -38,15 +38,6 @@ def fecha_incorrecta(actual, real):
     if actual is None:
         return True
 
-    if actual > datetime.now(UTC):
-        return True
-
-    if actual.year < 2010:
-        return True
-
-    if actual > real:
-        return True
-
     return False
 
 
