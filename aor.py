@@ -3,90 +3,64 @@ import requests
 from dotenv import load_dotenv
 from datetime import datetime, UTC
 
-# Carrego variables del .env
 load_dotenv()
 
 KEY = os.getenv("TRELLO_API_KEY")
 TOKEN = os.getenv("TRELLO_TOKEN")
+
 BASE = "https://api.trello.com/1"
 AUTH = {"key": KEY, "token": TOKEN}
 
-# Etiquetes que no vull processar
 EXCLUIDAS = ["sub-orden", "archivar targeta"]
 
 
 def get(url, **params):
-    """GET bàsic amb autenticació."""
     r = requests.get(url, params={**AUTH, **params})
     r.raise_for_status()
     return r.json()
 
 
 def put(url, json=None, **params):
-    """PUT bàsic amb autenticació i suport per JSON."""
     r = requests.put(url, params={**AUTH, **params}, json=json)
     r.raise_for_status()
     return r.json()
 
 
-def fecha_creacion_real(card_id):
-    """
-    Trello no sempre guarda la data de creació al ID,
-    així que agafo la data real de l'acció createCard.
-    """
-    acciones = get(
-        f"{BASE}/cards/{card_id}/actions",
-        filter="createCard",
-        limit=1000  
-    )
-
-    for a in acciones:
-        if a["type"] == "createCard":
-            return a["date"]
-
-    return None
-
-
-def parse_fecha(fecha_str):
-    """Converteix ISO a datetime. Si falla, retorno None."""
+def fecha_creacion(card_id):
     try:
-        return datetime.fromisoformat(fecha_str.replace("Z", "+00:00"))
+        fecha = int(card_id[:8], 16)
+        return datetime.fromtimestamp(fecha, UTC)
     except:
         return None
 
 
-def fecha_incorrecta(fecha_actual, fecha_real):
-    """
-    Comprovo si la data AOR és incorrecta.
-    Criteris simples però útils.
-    """
-    if fecha_actual is None:
+def fecha_incorrecta(actual, real):
+    if actual is None:
         return True
 
-    # Data futura → incorrecta
-    if fecha_actual > datetime.now(UTC):
+    if actual > datetime.now(UTC):
         return True
 
-    # Trello no existia abans del 2010
-    if fecha_actual.year < 2010:
+    if actual.year < 2010:
         return True
 
-    # Si la data AOR és posterior a la creació real → incorrecta
-    if fecha_actual > fecha_real:
+    if actual > real:
         return True
 
     return False
 
 
 def buscar_tablero(nombre):
-    """Retorno el tauler pel nom."""
-    for b in get(f"{BASE}/members/me/boards"):
-        if b["name"].strip().lower() == nombre.strip().lower():
-            return b
+    tableros = get(f"{BASE}/members/me/boards")
+
+    for tablero in tableros:
+        if tablero["name"].lower() == nombre.lower():
+            return tablero
+
+    return None
 
 
 def main():
-
     nombre = input("Tablero: ").strip()
     tablero = buscar_tablero(nombre)
 
@@ -96,38 +70,35 @@ def main():
 
     print(f"\nTablero: {tablero['name']}\n")
 
-    # Només vull les llistes arxivades
-    listas_archivadas = [
-        l for l in get(f"{BASE}/boards/{tablero['id']}/lists", filter="all")
-        if l["closed"] is True
-    ]
+    listas = get(
+        f"{BASE}/boards/{tablero['id']}/lists",
+        filter="all"
+    )
 
-    if not listas_archivadas:
+    listas = [x for x in listas if x["closed"]]
+
+    if not listas:
         print("No hay listas archivadas.")
         return
 
-    print(f"Listas archivadas encontradas: {len(listas_archivadas)}")
+    print(f"Listas archivadas encontradas: {len(listas)}")
 
     campos = get(f"{BASE}/boards/{tablero['id']}/customFields")
 
-    # Busco el camp AOR
-    aor = next(
-        (x for x in campos if x["name"].strip().upper() == "AOR"),
-        None
-    )
+    aor = None
+
+    for campo in campos:
+        if campo["name"].strip().upper() == "AOR":
+            aor = campo
+            break
 
     if not aor:
         print("No se ha encontrado el campo AOR.")
         return
 
-    print(f"\nCampo AOR detectado como tipo: {aor['type']}\n")
-
-    for lista in listas_archivadas:
-
+    for lista in listas:
         print(f"\n=== Lista archivada: {lista['name']} ===")
 
-        # Desarxivo per poder modificar
-        print("Desarchivando lista...")
         put(f"{BASE}/lists/{lista['id']}", closed="false")
 
         tarjetas = get(
@@ -139,51 +110,52 @@ def main():
         print(f"Tarjetas: {len(tarjetas)}")
 
         for tarjeta in tarjetas:
-
             nombre = tarjeta["name"]
 
-            # Si té alguna etiqueta exclosa, la salto
-            etiquetas = [
-                x.get("name", "").strip().lower()
-                for x in tarjeta.get("labels", [])
-            ]
+            etiquetas = []
+            for etiqueta in tarjeta.get("labels", []):
+                etiquetas.append(
+                    etiqueta.get("name", "").strip().lower()
+                )
 
             if any(x in etiquetas for x in EXCLUIDAS):
                 print(f"⏭️ {nombre} -> excluida")
                 continue
 
-            # Data real de creació
-            fecha_real_str = fecha_creacion_real(tarjeta["id"])
-            if not fecha_real_str:
+            fecha_real = fecha_creacion(tarjeta["id"])
+
+            if not fecha_real:
                 print(f"⏭️ {nombre} -> sin fecha de creación")
                 continue
 
-            fecha_real_dt = parse_fecha(fecha_real_str)
+            fecha_actual = None
 
-            # Data actual del camp AOR
-            fecha_actual_str = None
             for item in tarjeta.get("customFieldItems", []):
                 if item["idCustomField"] == aor["id"]:
-                    fecha_actual_str = item.get("value", {}).get("date")
+                    fecha_actual = item.get("value", {}).get("date")
+                    break
 
-            fecha_actual_dt = parse_fecha(fecha_actual_str) if fecha_actual_str else None
+            if fecha_actual:
+                fecha_actual = datetime.fromisoformat(
+                    fecha_actual.replace("Z", "+00:00")
+                )
 
-            # Validació
-            if fecha_incorrecta(fecha_actual_dt, fecha_real_dt):
-                payload = {"value": {"date": fecha_real_str}}
+            if fecha_incorrecta(fecha_actual, fecha_real):
+                fecha = fecha_real.isoformat().replace("+00:00", "Z")
+
                 try:
                     put(
                         f"{BASE}/cards/{tarjeta['id']}/customField/{aor['id']}/item",
-                        json=payload
+                        json={"value": {"date": fecha}}
                     )
-                    print(f"🔧 {nombre} -> corregida a {fecha_real_str}")
+
+                    print(f"🔧 {nombre} -> corregida a {fecha}")
+
                 except requests.HTTPError as e:
                     print(f"❌ {nombre} -> {e}")
             else:
-                print(f"✔ {nombre} -> fecha correcta, no se modifica")
+                print(f"✔ {nombre} -> fecha correcta")
 
-        # Torno a arxivar la llista
-        print("Archivando lista...")
         put(f"{BASE}/lists/{lista['id']}", closed="true")
 
     print("\nTerminado.")
